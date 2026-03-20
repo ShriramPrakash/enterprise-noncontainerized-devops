@@ -1,0 +1,148 @@
+name: Build and Deploy Dev
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'app/**'
+      - 'scripts/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-web:
+    runs-on: ubuntu-latest
+    outputs:
+      web_version: ${{ steps.v.outputs.web_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: echo "web_version=$(cat app/web/version.txt)" >> "$GITHUB_OUTPUT"
+      - run: |
+          mkdir -p dist
+          zip -r dist/webapp-${{ steps.v.outputs.web_version }}.zip app/web
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+      - run: |
+          aws s3 cp dist/webapp-${{ steps.v.outputs.web_version }}.zip \
+            s3://${{ secrets.DEV_ARTIFACT_BUCKET }}/dev/web/webapp-${{ steps.v.outputs.web_version }}.zip
+          aws s3 cp scripts/web/deploy_web.sh s3://${{ secrets.DEV_ARTIFACT_BUCKET }}/dev/web/deploy_web.sh
+          aws s3 cp scripts/web/smoke_test.sh s3://${{ secrets.DEV_ARTIFACT_BUCKET }}/dev/web/smoke_test.sh
+
+  build-linux-rpm:
+    runs-on: ubuntu-latest
+    outputs:
+      rpm_name: ${{ steps.rpm.outputs.rpm_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+      - run: |
+          mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          cp app/agent-linux/src/myagent.sh ~/rpmbuild/SOURCES/
+          cp app/agent-linux/packaging/myagent.service ~/rpmbuild/SOURCES/
+          cp app/agent-linux/packaging/config.env ~/rpmbuild/SOURCES/
+          cp app/agent-linux/packaging/myagent.spec ~/rpmbuild/SPECS/
+          rpmbuild -bb ~/rpmbuild/SPECS/myagent.spec --define "_topdir %(echo $HOME)/rpmbuild"
+          mkdir -p dist
+          find ~/rpmbuild/RPMS -name "*.rpm" -exec cp {} dist/ \;
+      - id: rpm
+        run: echo "rpm_name=$(basename $(ls dist/*.rpm | head -n 1))" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+      - run: |
+          RPM_FILE=$(ls dist/*.rpm | head -n 1)
+          aws s3 cp "$RPM_FILE" s3://${{ secrets.DEV_ARTIFACT_BUCKET }}/dev/linux-agent/${{ steps.rpm.outputs.rpm_name }}
+          aws s3 cp scripts/agent-linux/install_rpm.sh s3://${{ secrets.DEV_ARTIFACT_BUCKET }}/dev/linux-agent/install_rpm.sh
+
+  build-windows-exe:
+    runs-on: windows-latest
+    outputs:
+      exe_name: ${{ steps.exe.outputs.exe_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - shell: powershell
+        run: choco install innosetup -y
+      - shell: powershell
+        run: |
+          cd app/agent-windows/packaging
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+      - id: exe
+        shell: powershell
+        run: |
+          $file = Get-ChildItem app/agent-windows/packaging/output/*.exe | Select-Object -First 1
+          "exe_name=$($file.Name)" >> $env:GITHUB_OUTPUT
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+      - shell: powershell
+        run: |
+          $file = Get-ChildItem app/agent-windows/packaging/output/*.exe | Select-Object -First 1
+          aws s3 cp $file.FullName s3://${{ secrets.DEV_ARTIFACT_BUCKET }}/dev/windows-agent/${{ steps.exe.outputs.exe_name }}
+          aws s3 cp scripts/agent-windows/install_exe.ps1 s3://${{ secrets.DEV_ARTIFACT_BUCKET }}/dev/windows-agent/install_exe.ps1
+
+  deploy-dev:
+    runs-on: ubuntu-latest
+    environment: dev
+    needs: [build-web, build-linux-rpm, build-windows-exe]
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Deploy web to dev via SSM
+        run: |
+          VERSION=${{ needs.build-web.outputs.web_version }}
+          aws ssm send-command \
+            --instance-ids "${{ secrets.DEV_WEB_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands="[
+              \"set -e\",
+              \"mkdir -p /tmp/company-web\",
+              \"aws s3 cp s3://${{ secrets.DEV_ARTIFACT_BUCKET }}/dev/web/webapp-$VERSION.zip /tmp/company-web/webapp-$VERSION.zip\",
+              \"aws s3 cp s3://${{ secrets.DEV_ARTIFACT_BUCKET }}/dev/web/deploy_web.sh /tmp/company-web/deploy_web.sh\",
+              \"aws s3 cp s3://${{ secrets.DEV_ARTIFACT_BUCKET }}/dev/web/smoke_test.sh /tmp/company-web/smoke_test.sh\",
+              \"chmod +x /tmp/company-web/*.sh\",
+              \"/tmp/company-web/deploy_web.sh /tmp/company-web/webapp-$VERSION.zip $VERSION\",
+              \"/tmp/company-web/smoke_test.sh\"
+            ]"
+
+      - name: Deploy linux rpm to dev via SSM
+        run: |
+          RPM_NAME=${{ needs.build-linux-rpm.outputs.rpm_name }}
+          aws ssm send-command \
+            --instance-ids "${{ secrets.DEV_LINUX_AGENT_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands="[
+              \"set -e\",
+              \"mkdir -p /tmp/linux-agent\",
+              \"aws s3 cp s3://${{ secrets.DEV_ARTIFACT_BUCKET }}/dev/linux-agent/$RPM_NAME /tmp/linux-agent/$RPM_NAME\",
+              \"aws s3 cp s3://${{ secrets.DEV_ARTIFACT_BUCKET }}/dev/linux-agent/install_rpm.sh /tmp/linux-agent/install_rpm.sh\",
+              \"chmod +x /tmp/linux-agent/install_rpm.sh\",
+              \"/tmp/linux-agent/install_rpm.sh /tmp/linux-agent/$RPM_NAME\"
+            ]"
+
+      - name: Deploy windows exe to dev via SSM
+        run: |
+          EXE_NAME=${{ needs.build-windows-exe.outputs.exe_name }}
+          aws ssm send-command \
+            --instance-ids "${{ secrets.DEV_WINDOWS_AGENT_INSTANCE_ID }}" \
+            --document-name "AWS-RunPowerShellScript" \
+            --parameters commands="[
+              \"New-Item -ItemType Directory -Force -Path C:\\temp\\agent | Out-Null\",
+              \"Read-S3Object -BucketName '${{ secrets.DEV_ARTIFACT_BUCKET }}' -Key 'dev/windows-agent/$EXE_NAME' -File 'C:\\temp\\agent\\$EXE_NAME'\",
+              \"Read-S3Object -BucketName '${{ secrets.DEV_ARTIFACT_BUCKET }}' -Key 'dev/windows-agent/install_exe.ps1' -File 'C:\\temp\\agent\\install_exe.ps1'\",
+              \"powershell -ExecutionPolicy Bypass -File C:\\temp\\agent\\install_exe.ps1 -InstallerPath C:\\temp\\agent\\$EXE_NAME\"
+            ]"
