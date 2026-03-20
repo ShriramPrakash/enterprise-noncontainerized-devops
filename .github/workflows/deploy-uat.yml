@@ -1,0 +1,43 @@
+name: Deploy UAT
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: 'release branch name, example release/1.0.0'
+        required: true
+      web_version:
+        description: 'web version, example 1.0.0'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-uat:
+    runs-on: ubuntu-latest
+    environment: uat
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Deploy web to UAT
+        run: |
+          RELEASE="${{ inputs.release_name }}"
+          VERSION="${{ inputs.web_version }}"
+          aws ssm send-command \
+            --instance-ids "${{ secrets.UAT_WEB_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands="[
+              \"set -e\",
+              \"mkdir -p /tmp/company-web\",
+              \"aws s3 cp s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/web/webapp-$VERSION.zip /tmp/company-web/webapp-$VERSION.zip\",
+              \"aws s3 cp s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/web/deploy_web.sh /tmp/company-web/deploy_web.sh\",
+              \"aws s3 cp s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/web/smoke_test.sh /tmp/company-web/smoke_test.sh\",
+              \"chmod +x /tmp/company-web/*.sh\",
+              \"/tmp/company-web/deploy_web.sh /tmp/company-web/webapp-$VERSION.zip $VERSION\",
+              \"/tmp/company-web/smoke_test.sh\"
+            ]"
