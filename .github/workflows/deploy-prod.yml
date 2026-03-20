@@ -1,0 +1,44 @@
+name: Deploy Prod
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-prod:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Terraform apply prod if infra changed
+        working-directory: terraform/environments/prod
+        run: |
+          terraform init
+          terraform validate
+          terraform plan -out=tfplan
+          terraform apply -auto-approve tfplan
+
+      - name: Deploy web to prod
+        run: |
+          VERSION=$(cat app/web/version.txt)
+          RELEASE_SOURCE=$(git branch --show-current || echo "main")
+          aws ssm send-command \
+            --instance-ids "${{ secrets.PROD_WEB_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands="[
+              \"set -e\",
+              \"mkdir -p /tmp/company-web\",
+              \"aws s3 cp s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/release-$VERSION/web/webapp-$VERSION.zip /tmp/company-web/webapp-$VERSION.zip || true\",
+              \"aws s3 cp s3://${{ secrets.PROD_ARTIFACT_BUCKET }}/prod/web/deploy_web.sh /tmp/company-web/deploy_web.sh || true\",
+              \"aws s3 cp s3://${{ secrets.PROD_ARTIFACT_BUCKET }}/prod/web/smoke_test.sh /tmp/company-web/smoke_test.sh || true\"
+            ]"
