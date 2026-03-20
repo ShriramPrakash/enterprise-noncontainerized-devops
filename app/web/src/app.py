@@ -11,7 +11,7 @@ def home():
             version = f.read().strip()
     except Exception:
         pass
-    return f"Hello from enterprise web app. Version={version}"
+    return f"Hello from web app - PR demo change"
 
 @app.route("/health")
 def health():
