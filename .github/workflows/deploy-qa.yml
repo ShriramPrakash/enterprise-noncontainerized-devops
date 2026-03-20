@@ -1,0 +1,56 @@
+name: Deploy QA
+
+on:
+  push:
+    branches:
+      - 'release/*'
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-qa:
+    runs-on: ubuntu-latest
+    environment: qa
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Deploy web to QA
+        run: |
+          RELEASE=${GITHUB_REF_NAME}
+          VERSION=$(cat app/web/version.txt)
+          aws ssm send-command \
+            --instance-ids "${{ secrets.QA_WEB_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands="[
+              \"set -e\",
+              \"mkdir -p /tmp/company-web\",
+              \"aws s3 cp s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/web/webapp-$VERSION.zip /tmp/company-web/webapp-$VERSION.zip\",
+              \"aws s3 cp s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/web/deploy_web.sh /tmp/company-web/deploy_web.sh\",
+              \"aws s3 cp s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/web/smoke_test.sh /tmp/company-web/smoke_test.sh\",
+              \"chmod +x /tmp/company-web/*.sh\",
+              \"/tmp/company-web/deploy_web.sh /tmp/company-web/webapp-$VERSION.zip $VERSION\",
+              \"/tmp/company-web/smoke_test.sh\"
+            ]"
+
+      - name: Deploy linux agent to QA
+        run: |
+          RELEASE=${GITHUB_REF_NAME}
+          RPM_NAME=$(aws s3 ls s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/linux-agent/ | awk '/.rpm$/ {print $4}')
+          aws ssm send-command \
+            --instance-ids "${{ secrets.QA_LINUX_AGENT_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands="[
+              \"set -e\",
+              \"mkdir -p /tmp/linux-agent\",
+              \"aws s3 cp s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/linux-agent/$RPM_NAME /tmp/linux-agent/$RPM_NAME\",
+              \"aws s3 cp s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/linux-agent/install_rpm.sh /tmp/linux-agent/install_rpm.sh\",
+              \"chmod +x /tmp/linux-agent/install_rpm.sh\",
+              \"/tmp/linux-agent/install_rpm.sh /tmp/linux-agent/$RPM_NAME\"
+            ]"
