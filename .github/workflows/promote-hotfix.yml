@@ -1,0 +1,17 @@
+name: Promote Hotfix
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: 'stage or prod'
+        required: true
+      web_version:
+        description: 'web version'
+        required: true
+
+jobs:
+  hotfix-info:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Use this workflow after hotfix branch validation."
