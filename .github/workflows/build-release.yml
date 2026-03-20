@@ -1,0 +1,60 @@
+name: Build Release Artifacts
+
+on:
+  push:
+    branches:
+      - 'release/*'
+    paths:
+      - 'app/**'
+      - 'scripts/**'
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-version:
+    runs-on: ubuntu-latest
+    outputs:
+      release_name: ${{ steps.r.outputs.release_name }}
+      web_version: ${{ steps.v.outputs.web_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        run: echo "release_name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+      - id: v
+        run: echo "web_version=$(cat app/web/version.txt)" >> "$GITHUB_OUTPUT"
+
+  build-and-upload:
+    runs-on: ubuntu-latest
+    needs: prepare-version
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          mkdir -p dist
+          zip -r dist/webapp-${{ needs.prepare-version.outputs.web_version }}.zip app/web
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          cp app/agent-linux/src/myagent.sh ~/rpmbuild/SOURCES/
+          cp app/agent-linux/packaging/myagent.service ~/rpmbuild/SOURCES/
+          cp app/agent-linux/packaging/config.env ~/rpmbuild/SOURCES/
+          cp app/agent-linux/packaging/myagent.spec ~/rpmbuild/SPECS/
+          rpmbuild -bb ~/rpmbuild/SPECS/myagent.spec --define "_topdir %(echo $HOME)/rpmbuild"
+          find ~/rpmbuild/RPMS -name "*.rpm" -exec cp {} dist/ \;
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - run: |
+          RELEASE=${{ needs.prepare-version.outputs.release_name }}
+          VERSION=${{ needs.prepare-version.outputs.web_version }}
+          RPM_NAME=$(basename $(ls dist/*.rpm | head -n 1))
+          aws s3 cp dist/webapp-$VERSION.zip s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/web/webapp-$VERSION.zip
+          aws s3 cp dist/$RPM_NAME s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/linux-agent/$RPM_NAME
+          aws s3 cp scripts/web/deploy_web.sh s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/web/deploy_web.sh
+          aws s3 cp scripts/web/smoke_test.sh s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/web/smoke_test.sh
+          aws s3 cp scripts/agent-linux/install_rpm.sh s3://${{ secrets.RELEASE_ARTIFACT_BUCKET }}/releases/$RELEASE/linux-agent/install_rpm.sh
