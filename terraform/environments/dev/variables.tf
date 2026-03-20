@@ -1,0 +1,12 @@
+variable "aws_region" { type = string }
+variable "project_name" { type = string }
+variable "vpc_cidr" { type = string }
+variable "public_subnet_1_cidr" { type = string }
+variable "public_subnet_2_cidr" { type = string }
+variable "az1" { type = string }
+variable "az2" { type = string }
+variable "linux_ami_id" { type = string }
+variable "windows_ami_id" { type = string }
+variable "linux_instance_type" { type = string }
+variable "windows_instance_type" { type = string }
+variable "artifact_bucket_name" { type = string }
